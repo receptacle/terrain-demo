@@ -1,0 +1,621 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Organic Terrain — PixiJS 8</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #26352c;
+  color: #f1f4e9;
+  font-family: Arial, sans-serif;
+}
+
+h2 {
+  margin: 4px 0 16px;
+  font-size: 20px;
+}
+
+#controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 18px;
+  background: #d5b878;
+  color: #283329;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+}
+
+#game {
+  width: min(92vw, 768px);
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #6f9e59;
+  box-shadow: 0 8px 30px #0005;
+}
+
+#game canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#status {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #b8c8b6;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Organic Terrain</h2>
+
+<div id="controls">
+  <button id="generate">Перерисовать карту</button>
+  <label>
+    <input type="checkbox" id="showGrid">
+    Показать сетку
+  </label>
+</div>
+
+<div id="game"></div>
+<div id="status">Инициализация...</div>
+
+<script type="module">
+import * as PIXI from
+  'https://cdn.jsdelivr.net/npm/pixi.js@8.22.0/dist/pixi.min.mjs';
+
+// ==================================================
+// 1. НАСТРОЙКИ
+// ==================================================
+
+const CELLS = 32;
+const CELL_SIZE = 24;
+const SIZE = CELLS * CELL_SIZE;
+
+// Начало участка в мировых координатах.
+// Соседние участки должны использовать те же
+// мировые координаты, а не начинать отсчёт с нуля.
+
+const WORLD_ORIGIN_X = 0;
+const WORLD_ORIGIN_Y = 0;
+
+// Постоянный seed мира.
+// Не меняется при перерисовке.
+
+const WORLD_SEED = 73521;
+
+const TERRAIN = {
+  WATER: 0,
+  SAND: 1,
+  GRASS: 2,
+  SHRUB: 3,
+  FOREST: 4,
+  MOUNTAIN: 5
+};
+
+const COLORS = [
+  [69, 139, 166],   // Вода
+  [210, 184, 123],  // Песок
+  [111, 158, 89],   // Луг
+  [91, 128, 75],    // Кустарник
+  [49, 91, 62],     // Лес
+  [133, 133, 126]   // Горы
+];
+
+// Ширина визуального перехода между территориями.
+// В пикселях.
+
+const BLEND_WIDTH = 3.5;
+
+// Сила искривления границ.
+// Чем больше значение, тем органичнее контуры,
+// но тем сильнее визуально искажается сетка.
+
+const WARP_STRENGTH = 9;
+
+// ==================================================
+// 2. ДЕТЕРМИНИРОВАННЫЙ NOISE
+// ==================================================
+
+function hash(x, y, seed) {
+  const n = Math.sin(
+    x * 127.1 +
+    y * 311.7 +
+    seed * 74.7
+  ) * 43758.5453;
+
+  return n - Math.floor(n);
+}
+
+function smooth(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function noise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+
+  const fx = x - ix;
+  const fy = y - iy;
+
+  const a = hash(ix, iy, seed);
+  const b = hash(ix + 1, iy, seed);
+  const c = hash(ix, iy + 1, seed);
+  const d = hash(ix + 1, iy + 1, seed);
+
+  const u = smooth(fx);
+  const v = smooth(fy);
+
+  const top = a + (b - a) * u;
+  const bottom = c + (d - c) * u;
+
+  return top + (bottom - top) * v;
+}
+
+function fbm(x, y, seed) {
+  let result = 0;
+  let amplitude = 0.5;
+  let frequency = 1;
+  let total = 0;
+
+  for (let i = 0; i < 4; i++) {
+    result += noise(
+      x * frequency,
+      y * frequency,
+      seed + i * 17
+    ) * amplitude;
+
+    total += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+
+  return result / total;
+}
+
+// ==================================================
+// 3. ГЕНЕРАЦИЯ ТИПОВ КЛЕТОК
+// ==================================================
+
+// Это только генератор демонстрационных данных.
+// В настоящей игре вместо него будет массив,
+// полученный от сервера.
+
+function getTerrainType(worldCellX, worldCellY) {
+  const x = worldCellX;
+  const y = worldCellY;
+
+  const elevation = fbm(
+    x * 0.035,
+    y * 0.035,
+    WORLD_SEED
+  );
+
+  const moisture = fbm(
+    x * 0.045,
+    y * 0.045,
+    WORLD_SEED + 100
+  );
+
+  // Река привязана к мировым координатам.
+  const riverCenter =
+    15 +
+    Math.sin(x * 0.12) * 4 +
+    Math.sin(x * 0.27) * 2;
+
+  const riverDistance =
+    Math.abs(y - riverCenter);
+
+  if (riverDistance < 0.85) {
+    return TERRAIN.WATER;
+  }
+
+  // Озёра также имеют фиксированные координаты.
+  const lakes = [
+    { x: 23, y: 7, rx: 3.5, ry: 2.5 },
+    { x: 7, y: 26, rx: 2.8, ry: 2.2 }
+  ];
+
+  for (const lake of lakes) {
+    const dx = (x - lake.x) / lake.rx;
+    const dy = (y - lake.y) / lake.ry;
+
+    if (dx * dx + dy * dy < 1) {
+      return TERRAIN.WATER;
+    }
+  }
+
+  // Берега реки.
+  if (riverDistance < 1.65) {
+    return TERRAIN.SAND;
+  }
+
+  // Берега озёр.
+  for (const lake of lakes) {
+    const dx = (x - lake.x) / lake.rx;
+    const dy = (y - lake.y) / lake.ry;
+
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < 1.4) {
+      return TERRAIN.SAND;
+    }
+  }
+
+  // Остальные типы местности.
+  if (elevation > 0.68) {
+    return TERRAIN.MOUNTAIN;
+  }
+
+  if (moisture > 0.67) {
+    return TERRAIN.FOREST;
+  }
+
+  if (moisture > 0.56) {
+    return TERRAIN.SHRUB;
+  }
+
+  if (elevation < 0.34) {
+    return TERRAIN.SAND;
+  }
+
+  return TERRAIN.GRASS;
+}
+
+// ==================================================
+// 4. МАТРИЦА ИГРОВЫХ КЛЕТОК
+// ==================================================
+
+const terrainCells = [];
+
+function generateCellMap() {
+  terrainCells.length = 0;
+
+  for (let y = 0; y < CELLS; y++) {
+    const row = [];
+
+    for (let x = 0; x < CELLS; x++) {
+      row.push(
+        getTerrainType(
+          WORLD_ORIGIN_X + x,
+          WORLD_ORIGIN_Y + y
+        )
+      );
+    }
+
+    terrainCells.push(row);
+  }
+}
+
+// Получение типа клетки по мировым координатам.
+//
+// За пределами текущего участка используем
+// тот же детерминированный генератор.
+// Это позволяет вычислять границы на краях участка.
+
+function getCell(worldCellX, worldCellY) {
+  const localX = worldCellX - WORLD_ORIGIN_X;
+  const localY = worldCellY - WORLD_ORIGIN_Y;
+
+  if (
+    localX >= 0 &&
+    localX < CELLS &&
+    localY >= 0 &&
+    localY < CELLS
+  ) {
+    return terrainCells[localY][localX];
+  }
+
+  return getTerrainType(worldCellX, worldCellY);
+}
+
+// ==================================================
+// 5. НЕПРЕРЫВНОЕ ИСКРИВЛЕНИЕ ПРОСТРАНСТВА
+// ==================================================
+
+// Вместо того чтобы рисовать прямоугольные клетки,
+// мы немного деформируем пространство.
+//
+// Координаты остаются непрерывными.
+// Граница клетки превращается в извилистую линию.
+
+function warpCoordinates(x, y) {
+  const wx =
+    x +
+    Math.sin(y * 0.018 + Math.sin(x * 0.009) * 2.2)
+      * WARP_STRENGTH +
+    Math.sin(y * 0.043 + x * 0.016) * 2.2;
+
+  const wy =
+    y +
+    Math.sin(x * 0.017 + Math.sin(y * 0.008) * 2.1)
+      * WARP_STRENGTH +
+    Math.sin(x * 0.039 - y * 0.014) * 2.2;
+
+  return { x: wx, y: wy };
+}
+
+// ==================================================
+// 6. НЕПРЕРЫВНОЕ ПОЛЕ ЦВЕТОВ
+// ==================================================
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(
+    0,
+    Math.min(1, (x - edge0) / (edge1 - edge0))
+  );
+
+  return t * t * (3 - 2 * t);
+}
+
+function getPixelColor(screenX, screenY) {
+  const worldX =
+    WORLD_ORIGIN_X * CELL_SIZE + screenX;
+
+  const worldY =
+    WORLD_ORIGIN_Y * CELL_SIZE + screenY;
+
+  // Искажаем координаты.
+  const warped = warpCoordinates(worldX, worldY);
+
+  // Определяем логическую клетку.
+  const cellX = Math.floor(warped.x / CELL_SIZE);
+  const cellY = Math.floor(warped.y / CELL_SIZE);
+
+  const fx =
+    warped.x / CELL_SIZE - cellX;
+
+  const fy =
+    warped.y / CELL_SIZE - cellY;
+
+  const currentType = getCell(cellX, cellY);
+
+  const currentColor = COLORS[currentType];
+
+  // Расстояния до четырёх сторон клетки.
+  const distances = [
+    {
+      distance: fx * CELL_SIZE,
+      type: getCell(cellX - 1, cellY)
+    },
+    {
+      distance: (1 - fx) * CELL_SIZE,
+      type: getCell(cellX + 1, cellY)
+    },
+    {
+      distance: fy * CELL_SIZE,
+      type: getCell(cellX, cellY - 1)
+    },
+    {
+      distance: (1 - fy) * CELL_SIZE,
+      type: getCell(cellX, cellY + 1)
+    }
+  ];
+
+  // Ищем ближайшую границу с другим типом.
+  let closest = null;
+
+  for (const item of distances) {
+    if (item.type === currentType) {
+      continue;
+    }
+
+    if (
+      closest === null ||
+      item.distance < closest.distance
+    ) {
+      closest = item;
+    }
+  }
+
+  // Если вокруг только такой же тип,
+  // оставляем основной цвет.
+  if (closest === null) {
+    return currentColor;
+  }
+
+  const neighborColor = COLORS[closest.type];
+
+  // Смешиваем цвета только в узкой полосе
+  // около границы двух территорий.
+  const blend =
+    1 - smoothstep(
+      0,
+      BLEND_WIDTH,
+      closest.distance
+    );
+
+  return [
+    mix(currentColor[0], neighborColor[0], blend),
+    mix(currentColor[1], neighborColor[1], blend),
+    mix(currentColor[2], neighborColor[2], blend)
+  ];
+}
+
+// ==================================================
+// 7. СОЗДАНИЕ ТЕКСТУРЫ
+// ==================================================
+
+const canvas = document.createElement('canvas');
+
+canvas.width = SIZE;
+canvas.height = SIZE;
+
+const ctx = canvas.getContext('2d', {
+  willReadFrequently: true
+});
+
+const image = ctx.createImageData(SIZE, SIZE);
+const pixels = image.data;
+
+function clamp(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function renderTerrain() {
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const color = getPixelColor(x, y);
+
+      const index = (y * SIZE + x) * 4;
+
+      // Слабая детерминированная вариация цвета.
+      // Она не меняется между запусками.
+
+      const variation =
+        Math.sin(
+          (x + WORLD_ORIGIN_X * CELL_SIZE) * 0.045 +
+          Math.sin(
+            (y + WORLD_ORIGIN_Y * CELL_SIZE) * 0.035
+          )
+        ) * 3;
+
+      pixels[index] =
+        clamp(color[0] + variation);
+
+      pixels[index + 1] =
+        clamp(color[1] + variation);
+
+      pixels[index + 2] =
+        clamp(color[2] + variation);
+
+      pixels[index + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+
+  // Сообщаем PixiJS, что источник текстуры изменился.
+  terrainTexture.source.update();
+}
+
+// ==================================================
+// 8. PIXIJS 8
+// ==================================================
+
+const app = new PIXI.Application();
+
+await app.init({
+  width: SIZE,
+  height: SIZE,
+  backgroundColor: 0x6f9e59,
+  antialias: true,
+  resolution: Math.min(
+    window.devicePixelRatio || 1,
+    2
+  ),
+  autoDensity: true
+});
+
+document
+  .getElementById('game')
+  .appendChild(app.canvas);
+
+// Текстура создаётся один раз.
+const terrainTexture = PIXI.Texture.from(canvas);
+
+const terrainSprite = new PIXI.Sprite(terrainTexture);
+
+terrainSprite.width = SIZE;
+terrainSprite.height = SIZE;
+
+app.stage.addChild(terrainSprite);
+
+// Слой сетки находится поверх ландшафта.
+const gridGraphics = new PIXI.Graphics();
+
+app.stage.addChild(gridGraphics);
+
+// ==================================================
+// 9. СЕТКА
+// ==================================================
+
+let showGrid = false;
+
+function drawGrid() {
+  gridGraphics.clear();
+
+  if (!showGrid) {
+    return;
+  }
+
+  for (let i = 0; i <= CELLS; i++) {
+    const pos = i * CELL_SIZE;
+
+    gridGraphics
+      .moveTo(pos, 0)
+      .lineTo(pos, SIZE)
+      .moveTo(0, pos)
+      .lineTo(SIZE, pos);
+  }
+
+  gridGraphics.stroke({
+    color: 0xffffff,
+    alpha: 0.28,
+    width: 1
+  });
+}
+
+// ==================================================
+// 10. ЗАПУСК
+// ==================================================
+
+function generate() {
+  generateCellMap();
+  renderTerrain();
+  drawGrid();
+
+  document.getElementById('status').textContent =
+    `Карта ${CELLS} × ${CELLS} · Seed ${WORLD_SEED}`;
+}
+
+document
+  .getElementById('generate')
+  .addEventListener('click', generate);
+
+document
+  .getElementById('showGrid')
+  .addEventListener('change', event => {
+    showGrid = event.target.checked;
+    drawGrid();
+  });
+
+generate();
+
+</script>
+</body>
+</html>
