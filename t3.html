@@ -1,0 +1,590 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terrain Prototype — PixiJS 8</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #26352c;
+  color: #f1f4e9;
+  font-family: Arial, sans-serif;
+}
+
+h2 {
+  margin: 4px 0 16px;
+  font-size: 20px;
+}
+
+#controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 18px;
+  background: #d5b878;
+  color: #283329;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+}
+
+#game {
+  width: min(92vw, 768px);
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #6f9e59;
+  box-shadow: 0 8px 30px #0005;
+}
+
+#game canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#status {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #b8c8b6;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Terrain Prototype</h2>
+
+<div id="controls">
+  <button id="generate">Новая карта</button>
+  <label>
+    <input type="checkbox" id="showGrid">
+    Показать сетку
+  </label>
+</div>
+
+<div id="game"></div>
+<div id="status">Инициализация...</div>
+
+<script type="module">
+import * as PIXI from
+  'https://cdn.jsdelivr.net/npm/pixi.js@8.22.0/dist/pixi.min.mjs';
+
+// ==================================================
+// 1. НАСТРОЙКИ
+// ==================================================
+
+const CELLS = 32;
+const CELL_SIZE = 24;
+const SIZE = CELLS * CELL_SIZE;
+
+// Координаты начала участка в мировых клетках.
+// В дальнейшем будут задаваться сервером.
+const WORLD_ORIGIN_X = 0;
+const WORLD_ORIGIN_Y = 0;
+
+// Не меняется между запусками.
+// Меняй seed только для создания другого мира.
+const WORLD_SEED = 73521;
+
+// Типы территорий
+const TERRAIN = {
+  WATER: 0,
+  SAND: 1,
+  GRASS: 2,
+  SHRUB: 3,
+  FOREST: 4,
+  MOUNTAIN: 5
+};
+
+const COLORS = [
+  [69, 139, 166],   // Вода
+  [210, 184, 123],  // Песок
+  [111, 158, 89],   // Луг
+  [91, 128, 75],    // Кустарник
+  [49, 91, 62],     // Лес
+  [133, 133, 126]   // Горы
+];
+
+// ==================================================
+// 2. ДЕТЕРМИНИРОВАННЫЙ NOISE
+// ==================================================
+
+function hash(x, y, seed) {
+  let n = Math.sin(
+    x * 127.1 +
+    y * 311.7 +
+    seed * 74.7
+  ) * 43758.5453;
+
+  return n - Math.floor(n);
+}
+
+function smooth(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function noise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+
+  const fx = x - ix;
+  const fy = y - iy;
+
+  const a = hash(ix, iy, seed);
+  const b = hash(ix + 1, iy, seed);
+  const c = hash(ix, iy + 1, seed);
+  const d = hash(ix + 1, iy + 1, seed);
+
+  const u = smooth(fx);
+  const v = smooth(fy);
+
+  const top = a + (b - a) * u;
+  const bottom = c + (d - c) * u;
+
+  return top + (bottom - top) * v;
+}
+
+function fbm(x, y, seed) {
+  let result = 0;
+  let amplitude = 0.5;
+  let frequency = 1;
+  let total = 0;
+
+  for (let i = 0; i < 4; i++) {
+    result += noise(
+      x * frequency,
+      y * frequency,
+      seed + i * 17
+    ) * amplitude;
+
+    total += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+
+  return result / total;
+}
+
+// ==================================================
+// 3. ОПРЕДЕЛЕНИЕ ТИПА КЛЕТКИ
+// ==================================================
+
+// Эта функция демонстрационная.
+// В будущем вместо неё будем брать тип клетки
+// из данных, полученных от сервера.
+//
+// Важно: используются мировые координаты,
+// поэтому соседние участки будут согласованы.
+
+function getTerrainType(worldCellX, worldCellY) {
+  const x = worldCellX;
+  const y = worldCellY;
+
+  const elevation = fbm(
+    x * 0.085,
+    y * 0.085,
+    WORLD_SEED
+  );
+
+  const moisture = fbm(
+    x * 0.12,
+    y * 0.12,
+    WORLD_SEED + 100
+  );
+
+  // Извилистая река
+  const riverCenter =
+    15 +
+    Math.sin(x * 0.12) * 4 +
+    Math.sin(x * 0.27) * 2;
+
+  const riverDistance =
+    Math.abs(y - riverCenter);
+
+  if (riverDistance < 1.0) {
+    return TERRAIN.WATER;
+  }
+
+  // Небольшие озёра
+  const lakes = [
+    { x: 23, y: 7, radius: 3.5 },
+    { x: 7, y: 26, radius: 2.8 }
+  ];
+
+  for (const lake of lakes) {
+    const dx = (x - lake.x) / lake.radius;
+    const dy = (y - lake.y) / lake.radius;
+
+    if (dx * dx + dy * dy < 1) {
+      return TERRAIN.WATER;
+    }
+  }
+
+  // Песчаные берега
+  if (riverDistance < 1.8) {
+    return TERRAIN.SAND;
+  }
+
+  for (const lake of lakes) {
+    const dx = (x - lake.x) / lake.radius;
+    const dy = (y - lake.y) / lake.radius;
+
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < 1.45) {
+      return TERRAIN.SAND;
+    }
+  }
+
+  // Остальные биомы
+  if (elevation > 0.69) {
+    return TERRAIN.MOUNTAIN;
+  }
+
+  if (moisture > 0.67) {
+    return TERRAIN.FOREST;
+  }
+
+  if (moisture > 0.54) {
+    return TERRAIN.SHRUB;
+  }
+
+  if (elevation < 0.34) {
+    return TERRAIN.SAND;
+  }
+
+  return TERRAIN.GRASS;
+}
+
+// ==================================================
+// 4. МАТРИЦА ТЕРРИТОРИЙ
+// ==================================================
+
+const terrainCells = [];
+
+function generateCellMap() {
+  terrainCells.length = 0;
+
+  for (let y = 0; y < CELLS; y++) {
+    const row = [];
+
+    for (let x = 0; x < CELLS; x++) {
+      const worldX = WORLD_ORIGIN_X + x;
+      const worldY = WORLD_ORIGIN_Y + y;
+
+      row.push(
+        getTerrainType(worldX, worldY)
+      );
+    }
+
+    terrainCells.push(row);
+  }
+}
+
+// Получение типа по мировым координатам клетки.
+// Для текущего демонстрационного участка используем
+// детерминированную функцию, в том числе за его краями.
+
+function getCell(worldX, worldY) {
+  return getTerrainType(worldX, worldY);
+}
+
+// ==================================================
+// 5. ИСКРИВЛЕНИЕ ГРАНИЦ
+// ==================================================
+
+// Ключевая часть визуализации.
+//
+// Логическая сетка остаётся квадратной.
+// Но перед определением типа клетки мы немного
+// смещаем координату с помощью непрерывного шума.
+//
+// Благодаря этому границы становятся извилистыми,
+// а не строго прямыми.
+
+function warpX(x, y) {
+  return (
+    fbm(x * 0.012, y * 0.012, WORLD_SEED + 300) - 0.5
+  ) * 11;
+}
+
+function warpY(x, y) {
+  return (
+    fbm(x * 0.012, y * 0.012, WORLD_SEED + 400) - 0.5
+  ) * 11;
+}
+
+// ==================================================
+// 6. СМЕШИВАНИЕ ЦВЕТОВ
+// ==================================================
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(
+    0,
+    Math.min(1, (x - edge0) / (edge1 - edge0))
+  );
+
+  return t * t * (3 - 2 * t);
+}
+
+function getPixelColor(worldX, worldY) {
+  const wx = worldX + warpX(worldX, worldY);
+  const wy = worldY + warpY(worldX, worldY);
+
+  const cellX = Math.floor(wx / CELL_SIZE);
+  const cellY = Math.floor(wy / CELL_SIZE);
+
+  const fx = wx / CELL_SIZE - cellX;
+  const fy = wy / CELL_SIZE - cellY;
+
+  const current = getCell(cellX, cellY);
+
+  let neighbor = current;
+  let distance = 999;
+
+  // Ищем ближайшую границу клетки.
+  const left = fx * CELL_SIZE;
+  const right = (1 - fx) * CELL_SIZE;
+  const top = fy * CELL_SIZE;
+  const bottom = (1 - fy) * CELL_SIZE;
+
+  if (left < distance) {
+    distance = left;
+    neighbor = getCell(cellX - 1, cellY);
+  }
+
+  if (right < distance) {
+    distance = right;
+    neighbor = getCell(cellX + 1, cellY);
+  }
+
+  if (top < distance) {
+    distance = top;
+    neighbor = getCell(cellX, cellY - 1);
+  }
+
+  if (bottom < distance) {
+    distance = bottom;
+    neighbor = getCell(cellX, cellY + 1);
+  }
+
+  const currentColor = COLORS[current];
+  const neighborColor = COLORS[neighbor];
+
+  // Ширина перехода между территориями
+  const blend = 1 - smoothstep(0, 2.5, distance);
+
+  return [
+    mix(currentColor[0], neighborColor[0], blend),
+    mix(currentColor[1], neighborColor[1], blend),
+    mix(currentColor[2], neighborColor[2], blend)
+  ];
+}
+
+// ==================================================
+// 7. СОЗДАНИЕ ТЕКСТУРЫ
+// ==================================================
+
+const canvas = document.createElement('canvas');
+canvas.width = SIZE;
+canvas.height = SIZE;
+
+const ctx = canvas.getContext('2d', {
+  willReadFrequently: true
+});
+
+const image = ctx.createImageData(SIZE, SIZE);
+const pixels = image.data;
+
+function renderTerrain() {
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+
+      const worldX =
+        WORLD_ORIGIN_X * CELL_SIZE + x;
+
+      const worldY =
+        WORLD_ORIGIN_Y * CELL_SIZE + y;
+
+      const color = getPixelColor(worldX, worldY);
+
+      const index = (y * SIZE + x) * 4;
+
+      // Небольшая детерминированная вариация
+      // цвета для устранения ощущения плоской заливки.
+
+      const variation =
+        (fbm(
+          worldX * 0.035,
+          worldY * 0.035,
+          WORLD_SEED + 500
+        ) - 0.5) * 10;
+
+      pixels[index] = clamp(color[0] + variation);
+      pixels[index + 1] = clamp(color[1] + variation);
+      pixels[index + 2] = clamp(color[2] + variation);
+      pixels[index + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+
+  // Небольшие низкополигональные грани.
+  // Координаты и оттенки также детерминированы.
+
+  for (let y = 0; y < SIZE; y += 28) {
+    for (let x = 0; x < SIZE; x += 28) {
+      const h = hash(
+        WORLD_ORIGIN_X * CELL_SIZE + x,
+        WORLD_ORIGIN_Y * CELL_SIZE + y,
+        WORLD_SEED + 600
+      );
+
+      const size = 8 + h * 16;
+
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + size, y + size * 0.25);
+      ctx.lineTo(x + size * 0.25, y + size);
+
+      ctx.closePath();
+
+      ctx.fillStyle = h > 0.5
+        ? 'rgba(255,255,255,0.025)'
+        : 'rgba(0,0,0,0.025)';
+
+      ctx.fill();
+    }
+  }
+
+  terrainTexture.source.update();
+}
+
+function clamp(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+// ==================================================
+// 8. PIXIJS 8
+// ==================================================
+
+const app = new PIXI.Application();
+
+await app.init({
+  width: SIZE,
+  height: SIZE,
+  backgroundColor: 0x6f9e59,
+  antialias: true,
+  resolution: Math.min(window.devicePixelRatio || 1, 2),
+  autoDensity: true
+});
+
+document.getElementById('game').appendChild(app.canvas);
+
+// Текстура создаётся один раз.
+// При генерации обновляем её источник,
+// а не создаём новые текстуры.
+
+const terrainTexture = PIXI.Texture.from(canvas);
+
+const terrainSprite = new PIXI.Sprite(terrainTexture);
+
+terrainSprite.width = SIZE;
+terrainSprite.height = SIZE;
+
+app.stage.addChild(terrainSprite);
+
+// Слой сетки
+const gridGraphics = new PIXI.Graphics();
+
+app.stage.addChild(gridGraphics);
+
+// ==================================================
+// 9. ОТОБРАЖЕНИЕ СЕТКИ
+// ==================================================
+
+let showGrid = false;
+
+function drawGrid() {
+  gridGraphics.clear();
+
+  if (!showGrid) {
+    return;
+  }
+
+  for (let i = 0; i <= CELLS; i++) {
+    const pos = i * CELL_SIZE;
+
+    gridGraphics
+      .moveTo(pos, 0)
+      .lineTo(pos, SIZE)
+      .moveTo(0, pos)
+      .lineTo(SIZE, pos);
+  }
+
+  gridGraphics.stroke({
+    color: 0xffffff,
+    alpha: 0.28,
+    width: 1
+  });
+}
+
+// ==================================================
+// 10. ЗАПУСК И УПРАВЛЕНИЕ
+// ==================================================
+
+function generate() {
+  generateCellMap();
+  renderTerrain();
+  drawGrid();
+
+  document.getElementById('status').textContent =
+    'Карта: ' + CELLS + ' × ' + CELLS +
+    ' · Seed: ' + WORLD_SEED;
+}
+
+document
+  .getElementById('generate')
+  .addEventListener('click', generate);
+
+document
+  .getElementById('showGrid')
+  .addEventListener('change', event => {
+    showGrid = event.target.checked;
+    drawGrid();
+  });
+
+generate();
+
+</script>
+</body>
+</html>
