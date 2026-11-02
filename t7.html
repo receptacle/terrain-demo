@@ -1,0 +1,564 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Terrain Designer</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 12px;
+  background: #20242a;
+  color: white;
+  font-family: Arial, sans-serif;
+}
+
+h2 {
+  font-size: 18px;
+  margin: 4px 0 14px;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.control {
+  background: #303741;
+  padding: 10px;
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.control label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: #e1e5eb;
+}
+
+.control select,
+.control input {
+  width: 100%;
+}
+
+.control select {
+  background: #485361;
+  color: white;
+  border: 0;
+  padding: 8px;
+  border-radius: 5px;
+}
+
+.control input {
+  accent-color: #83b6e9;
+}
+
+.value {
+  float: right;
+  color: #a9c9e9;
+  font-weight: bold;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+button {
+  border: 0;
+  border-radius: 7px;
+  padding: 10px 13px;
+  background: #414b58;
+  color: white;
+  font-size: 14px;
+}
+
+#viewport {
+  width: 100%;
+  height: 68vh;
+  overflow: auto;
+  border: 1px solid #59616c;
+  border-radius: 8px;
+  background: #15191e;
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+#map {
+  width: 768px;
+  height: 768px;
+}
+
+#map canvas {
+  display: block;
+  width: 768px;
+  height: 768px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #d4d8df;
+}
+
+.legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+#info {
+  color: #aeb7c2;
+  font-size: 12px;
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+@media (max-width: 420px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<h2>Terrain Designer — настройки границ</h2>
+
+<div class="controls">
+
+  <div class="control">
+    <label>
+      Глубина окружения
+      <span class="value" id="radiusValue">2</span>
+    </label>
+    <input id="radius" type="range" min="1" max="5" step="1" value="2">
+  </div>
+
+  <div class="control">
+    <label>Тип шума</label>
+    <select id="noiseType">
+      <option value="none">Без шума</option>
+      <option value="soft" selected>Мягкий</option>
+      <option value="fbm">Многослойный</option>
+      <option value="ridged">Рельефный</option>
+    </select>
+  </div>
+
+  <div class="control">
+    <label>
+      Сила шума
+      <span class="value" id="strengthValue">50%</span>
+    </label>
+    <input id="strength" type="range" min="0" max="100" value="50">
+  </div>
+
+  <div class="control">
+    <label>
+      Масштаб шума
+      <span class="value" id="scaleValue">78</span>
+    </label>
+    <input id="scale" type="range" min="24" max="180" step="6" value="78">
+  </div>
+
+</div>
+
+<div class="buttons">
+  <button id="generate">Новая карта</button>
+  <button id="redraw">Применить настройки</button>
+  <button id="grid">Показать сетку</button>
+</div>
+
+<div id="viewport">
+  <div id="map"></div>
+</div>
+
+<div class="legend">
+  <span><i class="dot" style="background:#79ae58"></i>Трава</span>
+  <span><i class="dot" style="background:#a8794e"></i>Земля</span>
+  <span><i class="dot" style="background:#e5c982"></i>Песок</span>
+  <span><i class="dot" style="background:#e5edf1"></i>Снег</span>
+</div>
+
+<div id="info">32 × 32 клетки · Прокручивайте карту пальцем</div>
+
+<script type="module">
+import * as PIXI from 'https://cdn.jsdelivr.net/npm/pixi.js@8.22.0/dist/pixi.min.mjs';
+
+// --------------------------------------------------
+// ОСНОВНЫЕ НАСТРОЙКИ
+// --------------------------------------------------
+
+const CELLS = 32;
+const CELL = 24;
+const SIZE = CELLS * CELL;
+
+const COLORS = [
+  [121, 174, 88],
+  [168, 121, 78],
+  [229, 201, 130],
+  [229, 237, 241]
+];
+
+let seed = 73521;
+let showGrid = false;
+let terrain = [];
+let fields = [];
+
+const $ = id => document.getElementById(id);
+
+const app = new PIXI.Application();
+
+await app.init({
+  width: SIZE,
+  height: SIZE,
+  background: '#79ae58',
+  antialias: false
+});
+
+$('map').appendChild(app.canvas);
+
+// --------------------------------------------------
+// ДЕТЕРМИНИРОВАННЫЙ ШУМ
+// --------------------------------------------------
+
+function hash(x, y, s = 0) {
+  const n = Math.sin(
+    x * 127.1 + y * 311.7 + s * 74.7 + seed
+  ) * 43758.5453;
+
+  return n - Math.floor(n);
+}
+
+function fade(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function valueNoise(x, y, s = 0) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+
+  const fx = fade(x - ix);
+  const fy = fade(y - iy);
+
+  const a = hash(ix, iy, s);
+  const b = hash(ix + 1, iy, s);
+  const c = hash(ix, iy + 1, s);
+  const d = hash(ix + 1, iy + 1, s);
+
+  const top = a + (b - a) * fx;
+  const bottom = c + (d - c) * fx;
+
+  return top + (bottom - top) * fy;
+}
+
+function fbm(x, y) {
+  let sum = 0;
+  let amplitude = 0.57;
+  let total = 0;
+
+  for (let i = 0; i < 3; i++) {
+    sum += valueNoise(
+      x * (1 << i),
+      y * (1 << i),
+      i + 20
+    ) * amplitude;
+
+    total += amplitude;
+    amplitude *= 0.5;
+  }
+
+  return sum / total;
+}
+
+function getNoise(x, y, type, scale) {
+  if (type === 'none') return 0;
+
+  const nx = x / scale;
+  const ny = y / scale;
+
+  if (type === 'soft') {
+    return valueNoise(nx, ny, 30) - 0.5;
+  }
+
+  if (type === 'fbm') {
+    return fbm(nx, ny) - 0.5;
+  }
+
+  if (type === 'ridged') {
+    const n = fbm(nx, ny);
+    return (1 - Math.abs(n * 2 - 1)) - 0.5;
+  }
+
+  return 0;
+}
+
+// --------------------------------------------------
+// ТЕСТОВАЯ КАРТА
+// --------------------------------------------------
+
+function generateTerrain() {
+  terrain = [];
+
+  for (let y = 0; y < CELLS; y++) {
+    const row = [];
+
+    for (let x = 0; x < CELLS; x++) {
+      const large = valueNoise(x / 9, y / 9, 1);
+      const medium = valueNoise(x / 4.5, y / 4.5, 2);
+      const detail = valueNoise(x / 2.5, y / 2.5, 3);
+
+      const v = large * 0.65 + medium * 0.25 + detail * 0.1;
+
+      let type;
+
+      if (v < 0.27) type = 1;
+      else if (v < 0.49) type = 2;
+      else if (v < 0.75) type = 0;
+      else type = 3;
+
+      row.push(type);
+    }
+
+    terrain.push(row);
+  }
+}
+
+// --------------------------------------------------
+// РАСЧЁТ ПОЛЕЙ ПОВЕРХНОСТЕЙ
+// --------------------------------------------------
+
+function buildFields(radius) {
+  fields = [];
+
+  for (let type = 0; type < 4; type++) {
+    const field = Array.from(
+      { length: CELLS },
+      () => Array(CELLS).fill(0)
+    );
+
+    for (let y = 0; y < CELLS; y++) {
+      for (let x = 0; x < CELLS; x++) {
+        let total = 0;
+        let weightTotal = 0;
+
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const nx = x + dx;
+            const ny = y + dy;
+
+            if (
+              nx < 0 || ny < 0 ||
+              nx >= CELLS || ny >= CELLS
+            ) continue;
+
+            const distance2 = dx * dx + dy * dy;
+
+            // Вес соседней клетки уменьшается с расстоянием.
+            const weight = Math.exp(
+              -distance2 / Math.max(1.5, radius * 0.85)
+            );
+
+            if (terrain[ny][nx] === type) {
+              total += weight;
+            }
+
+            weightTotal += weight;
+          }
+        }
+
+        field[y][x] = total / weightTotal;
+      }
+    }
+
+    fields.push(field);
+  }
+}
+
+// --------------------------------------------------
+// ИНТЕРПОЛЯЦИЯ ПОЛЯ
+// --------------------------------------------------
+
+function sampleField(field, x, y) {
+  const gx = x / CELL - 0.5;
+  const gy = y / CELL - 0.5;
+
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+
+  const fx = gx - x0;
+  const fy = gy - y0;
+
+  function get(ix, iy) {
+    ix = Math.max(0, Math.min(CELLS - 1, ix));
+    iy = Math.max(0, Math.min(CELLS - 1, iy));
+    return field[iy][ix];
+  }
+
+  const a = get(x0, y0);
+  const b = get(x0 + 1, y0);
+  const c = get(x0, y0 + 1);
+  const d = get(x0 + 1, y0 + 1);
+
+  const top = a + (b - a) * fx;
+  const bottom = c + (d - c) * fx;
+
+  return top + (bottom - top) * fy;
+}
+
+// --------------------------------------------------
+// РЕНДЕР
+// --------------------------------------------------
+
+const canvas = document.createElement('canvas');
+canvas.width = SIZE;
+canvas.height = SIZE;
+
+const ctx = canvas.getContext('2d', { alpha: false });
+const image = ctx.createImageData(SIZE, SIZE);
+
+const terrainTexture = PIXI.Texture.from(canvas);
+const sprite = new PIXI.Sprite(terrainTexture);
+
+app.stage.addChild(sprite);
+
+function drawGrid() {
+  if (!showGrid) return;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+  ctx.lineWidth = 1;
+
+  for (let i = 0; i <= CELLS; i++) {
+    const p = i * CELL + 0.5;
+
+    ctx.beginPath();
+    ctx.moveTo(p, 0);
+    ctx.lineTo(p, SIZE);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(0, p);
+    ctx.lineTo(SIZE, p);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function renderTerrain() {
+  const radius = Number($('radius').value);
+  const noiseType = $('noiseType').value;
+  const strength = Number($('strength').value) / 100;
+  const scale = Number($('scale').value);
+
+  const data = image.data;
+
+  // Шум рассчитывается один раз на пиксель,
+  // а не отдельно для каждой поверхности.
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const n = getNoise(x, y, noiseType, scale) * strength * 0.32;
+
+      let bestType = 0;
+      let bestScore = -Infinity;
+
+      for (let type = 0; type < 4; type++) {
+        const score = sampleField(fields[type], x, y) +
+          n * (type % 2 === 0 ? 1 : -1);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestType = type;
+        }
+      }
+
+      const color = COLORS[bestType];
+      const i = (y * SIZE + x) * 4;
+
+      data[i] = color[0];
+      data[i + 1] = color[1];
+      data[i + 2] = color[2];
+      data[i + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+  drawGrid();
+
+  terrainTexture.source.update();
+}
+
+function update() {
+  const start = performance.now();
+
+  buildFields(Number($('radius').value));
+  renderTerrain();
+
+  const elapsed = Math.round(performance.now() - start);
+
+  $('info').textContent =
+    `Глубина: ${$('radius').value} клеток · ` +
+    `Шум: ${$('noiseType').selectedOptions[0].text} · ` +
+    `Перерисовка: ${elapsed} мс`;
+}
+
+function generate() {
+  seed += 137;
+  generateTerrain();
+  update();
+}
+
+// --------------------------------------------------
+// СОБЫТИЯ ИНТЕРФЕЙСА
+// --------------------------------------------------
+
+$('radius').addEventListener('input', () => {
+  $('radiusValue').textContent = $('radius').value;
+});
+
+$('strength').addEventListener('input', () => {
+  $('strengthValue').textContent = $('strength').value + '%';
+});
+
+$('scale').addEventListener('input', () => {
+  $('scaleValue').textContent = $('scale').value;
+});
+
+$('redraw').onclick = update;
+$('generate').onclick = generate;
+
+$('grid').onclick = () => {
+  showGrid = !showGrid;
+  renderTerrain();
+
+  $('grid').textContent = showGrid
+    ? 'Скрыть сетку'
+    : 'Показать сетку';
+};
+
+generate();
+
+</script>
+</body>
+</html>
