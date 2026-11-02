@@ -1,0 +1,502 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terrain Prototype — PixiJS 8</title>
+
+<style>
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #26352c;
+    color: #f1f4e9;
+    font-family: Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 12px;
+  }
+
+  h2 {
+    margin: 4px 0 16px;
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+
+  button {
+    border: 0;
+    border-radius: 8px;
+    padding: 11px 18px;
+    background: #d5b878;
+    color: #283329;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+
+  button:active {
+    transform: scale(0.97);
+  }
+
+  label {
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  #game {
+    width: min(92vw, 768px);
+    aspect-ratio: 1;
+    overflow: hidden;
+    border-radius: 8px;
+    background: #6f9e59;
+    box-shadow: 0 8px 30px #0005;
+  }
+
+  #game canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  #status {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #b8c8b6;
+  }
+</style>
+</head>
+
+<body>
+
+<h2>Terrain Prototype</h2>
+
+<div id="controls">
+  <button id="generate">Новая карта</button>
+
+  <label>
+    <input type="checkbox" id="showGrid">
+    Показать сетку
+  </label>
+</div>
+
+<div id="game"></div>
+<div id="status">Генерация карты...</div>
+
+<script type="module">
+import * as PIXI from
+  'https://cdn.jsdelivr.net/npm/pixi.js@8.22.0/dist/pixi.min.js';
+
+// ----------------------------------------
+// Настройки карты
+// ----------------------------------------
+
+const MAP_CELLS = 32;
+const CELL_SIZE = 24;
+const MAP_SIZE = MAP_CELLS * CELL_SIZE;
+
+// Типы поверхности:
+// 0 — луг
+// 1 — песок
+// 2 — вода
+
+const COLORS = {
+  grass: [111, 158, 89],
+  sand:  [210, 184, 123],
+  water: [69, 139, 166]
+};
+
+// ----------------------------------------
+// PixiJS Application
+// ----------------------------------------
+
+const app = new PIXI.Application();
+
+await app.init({
+  width: MAP_SIZE,
+  height: MAP_SIZE,
+  backgroundColor: 0x6f9e59,
+  antialias: true,
+  resolution: Math.min(window.devicePixelRatio || 1, 2),
+  autoDensity: true
+});
+
+const gameContainer = document.getElementById('game');
+gameContainer.appendChild(app.canvas);
+
+// ----------------------------------------
+// Слои
+// ----------------------------------------
+
+let terrainSprite = null;
+let terrainTexture = null;
+
+const gridGraphics = new PIXI.Graphics();
+
+app.stage.addChild(gridGraphics);
+
+let showGrid = false;
+
+// ----------------------------------------
+// Noise
+// ----------------------------------------
+
+function hash(x, y, seed) {
+  let n = Math.sin(
+    x * 127.1 +
+    y * 311.7 +
+    seed * 74.7
+  ) * 43758.5453;
+
+  return n - Math.floor(n);
+}
+
+function smooth(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function noise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+
+  const fx = x - ix;
+  const fy = y - iy;
+
+  const a = hash(ix, iy, seed);
+  const b = hash(ix + 1, iy, seed);
+  const c = hash(ix, iy + 1, seed);
+  const d = hash(ix + 1, iy + 1, seed);
+
+  const u = smooth(fx);
+  const v = smooth(fy);
+
+  const top = a + (b - a) * u;
+  const bottom = c + (d - c) * u;
+
+  return top + (bottom - top) * v;
+}
+
+function fractalNoise(x, y, seed) {
+  let value = 0;
+  let amplitude = 0.5;
+  let frequency = 1;
+  let total = 0;
+
+  for (let i = 0; i < 4; i++) {
+    value += noise(
+      x * frequency,
+      y * frequency,
+      seed + i * 13
+    ) * amplitude;
+
+    total += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+
+  return value / total;
+}
+
+// ----------------------------------------
+// Генерация ландшафта
+// ----------------------------------------
+
+function generateTerrain() {
+  const canvas = document.createElement('canvas');
+
+  canvas.width = MAP_SIZE;
+  canvas.height = MAP_SIZE;
+
+  const ctx = canvas.getContext('2d', {
+    willReadFrequently: true
+  });
+
+  const image = ctx.createImageData(
+    MAP_SIZE,
+    MAP_SIZE
+  );
+
+  const data = image.data;
+
+  const seed = Math.random() * 10000;
+
+  // Параметры реки
+  const riverY = MAP_SIZE * 0.48;
+  const riverAmplitude = MAP_SIZE * 0.15;
+  const riverFrequency = 0.009;
+
+  // Два водоёма
+  const ponds = [
+    {
+      x: MAP_SIZE * 0.73,
+      y: MAP_SIZE * 0.22,
+      rx: 85,
+      ry: 58
+    },
+    {
+      x: MAP_SIZE * 0.22,
+      y: MAP_SIZE * 0.78,
+      rx: 65,
+      ry: 48
+    }
+  ];
+
+  for (let y = 0; y < MAP_SIZE; y++) {
+    for (let x = 0; x < MAP_SIZE; x++) {
+
+      const warpX =
+        fractalNoise(x * 0.012, y * 0.012, seed) * 35;
+
+      const warpY =
+        fractalNoise(x * 0.012, y * 0.012, seed + 100) * 35;
+
+      const px = x + warpX - 17.5;
+      const py = y + warpY - 17.5;
+
+      // Извилистая река
+      const riverCenter =
+        riverY +
+        Math.sin(px * riverFrequency) * riverAmplitude +
+        Math.sin(px * riverFrequency * 2.3) * 25;
+
+      const riverWidth =
+        30 +
+        fractalNoise(px * 0.018, py * 0.018, seed + 200) * 13;
+
+      const riverDistance =
+        Math.abs(py - riverCenter);
+
+      let isWater = riverDistance < riverWidth;
+
+      // Водоёмы
+      for (const pond of ponds) {
+        const dx = (px - pond.x) / pond.rx;
+        const dy = (py - pond.y) / pond.ry;
+
+        const distortion =
+          fractalNoise(
+            px * 0.025,
+            py * 0.025,
+            seed + 300
+          ) * 0.18;
+
+        const distance =
+          Math.sqrt(dx * dx + dy * dy);
+
+        if (distance < 1 + distortion) {
+          isWater = true;
+        }
+      }
+
+      // Береговая полоса
+      const riverEdge = riverWidth + 14;
+
+      let isSand =
+        !isWater &&
+        riverDistance < riverEdge;
+
+      for (const pond of ponds) {
+        const dx = (px - pond.x) / pond.rx;
+        const dy = (py - pond.y) / pond.ry;
+
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        if (
+          !isWater &&
+          distance < 1.22 &&
+          distance > 0.85
+        ) {
+          isSand = true;
+        }
+      }
+
+      // Цвет поверхности
+      let baseColor;
+
+      if (isWater) {
+        baseColor = COLORS.water;
+      } else if (isSand) {
+        baseColor = COLORS.sand;
+      } else {
+        baseColor = COLORS.grass;
+      }
+
+      // Небольшая естественная вариация цвета
+      const variation =
+        (fractalNoise(
+          x * 0.045,
+          y * 0.045,
+          seed + 500
+        ) - 0.5) * 18;
+
+      // Лёгкий low-poly эффект
+      const triangleX = Math.floor(x / 24);
+      const triangleY = Math.floor(y / 24);
+
+      const triangleNoise = hash(
+        triangleX,
+        triangleY,
+        seed + 600
+      );
+
+      const facet =
+        triangleNoise > 0.5 ? 4 : -4;
+
+      const offset = (y * MAP_SIZE + x) * 4;
+
+      data[offset] = clamp(baseColor[0] + variation + facet);
+      data[offset + 1] = clamp(baseColor[1] + variation + facet);
+      data[offset + 2] = clamp(baseColor[2] + variation + facet);
+      data[offset + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+
+  // --------------------------------------
+  // Дополнительные крупные цветовые грани
+  // --------------------------------------
+
+  for (let i = 0; i < 180; i++) {
+    const x = Math.random() * MAP_SIZE;
+    const y = Math.random() * MAP_SIZE;
+
+    const size = 8 + Math.random() * 25;
+
+    ctx.beginPath();
+
+    ctx.moveTo(x, y);
+    ctx.lineTo(
+      x + size,
+      y + Math.random() * size
+    );
+    ctx.lineTo(
+      x - Math.random() * size,
+      y + size
+    );
+
+    ctx.closePath();
+
+    ctx.fillStyle =
+      Math.random() > 0.5
+        ? 'rgba(255,255,255,0.025)'
+        : 'rgba(0,0,0,0.025)';
+
+    ctx.fill();
+  }
+
+  return canvas;
+}
+
+function clamp(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+// ----------------------------------------
+// Отображение текстуры
+// ----------------------------------------
+
+function drawTerrain() {
+  const canvas = generateTerrain();
+
+  const newTexture = PIXI.Texture.from(canvas);
+
+  const newSprite = new PIXI.Sprite(newTexture);
+
+  newSprite.width = MAP_SIZE;
+  newSprite.height = MAP_SIZE;
+
+  if (terrainSprite) {
+    app.stage.removeChild(terrainSprite);
+    terrainSprite.destroy();
+  }
+
+  if (terrainTexture) {
+    terrainTexture.destroy(false);
+  }
+
+  terrainTexture = newTexture;
+  terrainSprite = newSprite;
+
+  app.stage.addChildAt(terrainSprite, 0);
+
+  drawGrid();
+
+  document.getElementById('status').textContent =
+    'Карта создана · ' +
+    MAP_CELLS + ' × ' + MAP_CELLS + ' клеток';
+}
+
+// ----------------------------------------
+// Отображение сетки
+// ----------------------------------------
+
+function drawGrid() {
+  gridGraphics.clear();
+
+  if (!showGrid) {
+    return;
+  }
+
+  const color = 0xffffff;
+  const alpha = 0.2;
+
+  for (let i = 0; i <= MAP_CELLS; i++) {
+    const pos = i * CELL_SIZE;
+
+    gridGraphics
+      .moveTo(pos, 0)
+      .lineTo(pos, MAP_SIZE)
+      .moveTo(0, pos)
+      .lineTo(MAP_SIZE, pos);
+  }
+
+  gridGraphics.stroke({
+    color,
+    alpha,
+    width: 1
+  });
+}
+
+// ----------------------------------------
+// Управление
+// ----------------------------------------
+
+document
+  .getElementById('generate')
+  .addEventListener('click', () => {
+    drawTerrain();
+  });
+
+document
+  .getElementById('showGrid')
+  .addEventListener('change', (event) => {
+    showGrid = event.target.checked;
+    drawGrid();
+  });
+
+// ----------------------------------------
+// Запуск
+// ----------------------------------------
+
+drawTerrain();
+
+</script>
+</body>
+</html>
